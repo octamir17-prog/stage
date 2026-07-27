@@ -9,7 +9,7 @@ function gestionnaireErreurs(err, req, res, next) {
 
   if (err instanceof multer.MulterError) {
     if (err.code === 'LIMIT_FILE_SIZE') {
-      return res.status(413).json({ success: false, message: 'Fichier trop volumineux (2 Mo maximum).', errors: [] });
+      return res.status(413).json({ success: false, message: 'Fichier trop volumineux.', errors: [] });
     }
     return res.status(400).json({ success: false, message: 'Erreur lors de l\'envoi du fichier.', errors: [] });
   }
@@ -19,7 +19,7 @@ function gestionnaireErreurs(err, req, res, next) {
   }
 
   if (err.name === 'PrismaClientValidationError') {
-    return res.status(400).json({ success: false, message: 'Données invalides envoyées à la requête.', errors: [] });
+    return res.status(400).json({ success: false, message: 'Donnees invalides envoyees a la requete.', errors: [] });
   }
 
   if (err.name === 'PrismaClientKnownRequestError') {
@@ -27,20 +27,20 @@ function gestionnaireErreurs(err, req, res, next) {
       return res.status(404).json({ success: false, message: 'Ressource introuvable.', errors: [] });
     }
     if (err.code === 'P2002') {
-      return res.status(409).json({ success: false, message: 'Cette valeur existe déjà (conflit d\'unicité).', errors: [] });
+      return res.status(409).json({ success: false, message: 'Cette valeur existe deja (conflit d\'unicite).', errors: [] });
     }
     if (err.code === 'P2003') {
-      return res.status(409).json({ success: false, message: 'Référence invalide (élément lié introuvable).', errors: [] });
+      return res.status(409).json({ success: false, message: 'Reference invalide (element lie introuvable).', errors: [] });
     }
-    return res.status(400).json({ success: false, message: 'Erreur de données invalides.', errors: [] });
+    return res.status(400).json({ success: false, message: 'Erreur de donnees invalides.', errors: [] });
   }
 
   if (err.name === 'JsonWebTokenError' || err.name === 'TokenExpiredError') {
-    return res.status(401).json({ success: false, message: 'Token invalide ou expiré.', errors: [] });
+    return res.status(401).json({ success: false, message: 'Token invalide ou expire.', errors: [] });
   }
 
   if (err.type === 'entity.parse.failed') {
-    return res.status(400).json({ success: false, message: 'Corps de requête JSON invalide.', errors: [] });
+    return res.status(400).json({ success: false, message: 'Corps de requete JSON invalide.', errors: [] });
   }
 
   return res.status(500).json({ success: false, message: 'Erreur interne du serveur.', errors: [] });

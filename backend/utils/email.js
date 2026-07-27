@@ -13,20 +13,72 @@ const transporteur = nodemailer.createTransport({
   },
 });
 
-async function envoyerCodeInscription(destinataire, nomComplet, code) {
+async function envoyer(destinataire, sujet, contenu) {
   try {
     await transporteur.sendMail({
       from: process.env.EMAIL_FROM,
       to: destinataire,
-      subject: 'Code de vérification — Inscription',
-      text: `Bonjour ${nomComplet},\n\nVotre code de vérification est : ${code}\n\nCe code est valable 1 heure.`,
+      subject: sujet,
+      text: contenu,
     });
+    return true;
   } catch (erreur) {
-    console.error('Erreur envoi code inscription :', erreur.message);
+    console.error(`Erreur envoi email (${sujet}) :`, erreur.message);
+    return false;
   }
 }
-async function envoyerEmailRelance(destinataireUsername, referenceTicket, role) {
-  console.log(`[RELANCE] ${role} (${destinataireUsername}) — ticket ${referenceTicket} en retard`);
+
+async function envoyerCodeInscription(destinataire, nomComplet, code) {
+  const sujet = 'Code de verification - Inscription';
+  const contenu = `Bonjour ${nomComplet},
+
+Votre code de verification est : ${code}
+
+Ce code est valable 1 heure.`;
+
+  return envoyer(destinataire, sujet, contenu);
 }
 
-module.exports = { envoyerCodeInscription };
+async function envoyerLienActivation(destinataire, nomComplet, libelleRole, structureDesignation, token) {
+  const urlActivation = `${process.env.FRONTEND_URL}/activation/${token}`;
+  const sujet = `Activation de votre compte ${libelleRole}`;
+  const contenu = `Bonjour ${nomComplet},
+
+Vous avez ete designe ${libelleRole} pour la structure : ${structureDesignation}.
+
+Rendez-vous sur le lien ci-dessous pour choisir votre identifiant et votre mot de passe :
+${urlActivation}
+
+Ce lien est valable 24 heures et ne peut etre utilise qu'une seule fois.`;
+
+  return envoyer(destinataire, sujet, contenu);
+}
+
+async function envoyerRelanceManuelle(destinataire, nomComplet, referenceTicket, titreTicket, nomAgent) {
+  const sujet = `Relance sur le ticket ${referenceTicket}`;
+  const contenu = `Bonjour ${nomComplet},
+
+${nomAgent} vous relance concernant le ticket ${referenceTicket} : ${titreTicket}
+
+Ce ticket est en attente de prise en charge.`;
+
+  return envoyer(destinataire, sujet, contenu);
+}
+
+async function envoyerRelanceAutomatique(destinataire, nomComplet, referenceTicket, titreTicket, nombreJours) {
+  const sujet = `Retard de traitement - ticket ${referenceTicket}`;
+  const contenu = `Bonjour ${nomComplet},
+
+Le ticket ${referenceTicket} (${titreTicket}) n'a pas ete demarre depuis plus de ${nombreJours} jours.
+
+Merci de prendre en charge ce ticket ou de le reaffecter.`;
+
+  return envoyer(destinataire, sujet, contenu);
+}
+
+module.exports = {
+  envoyerCodeInscription,
+  envoyerLienActivation,
+  envoyerRelanceManuelle,
+  envoyerRelanceAutomatique,
+};

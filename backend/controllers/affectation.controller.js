@@ -1,47 +1,99 @@
 const prisma = require('../prisma/client');
+const { deriverStatutTicket } = require('../utils/statut');
 
-async function affecter(req, res) {
+const LIGNE_ACTIVE = { transfere: false, escalade: false, retourne: false };
+
+async function mettreAJourStatutTicket(tx, ticketId, technicienId, statutAffectation) {
+  const statut = deriverStatutTicket(technicienId, statutAffectation);
+
+  await tx.ticket.update({
+    where: { id: ticketId },
+    data: { statut },
+  });
+}
+
+function estLigneActive(affectation) {
+  return !affectation.transfere && !affectation.escalade && !affectation.retourne;
+}
+
+function aEteRecuParEscalade(affectation) {
+  if (!affectation.affectationPrecedente) {
+    return false;
+  }
+  return affectation.affectationPrecedente.escalade === true;
+}
+
+async function chargerAffectation(id) {
+  return prisma.affectation.findUnique({
+    where: { id: Number(id) },
+    include: {
+      ticket: true,
+      technicien: true,
+      affectationPrecedente: true,
+      responsable: {
+        include: {
+          structure: { include: { niveau: true } },
+        },
+      },
+    },
+  });
+}
+
+async function assignerTechnicien(req, res) {
   const { technicienId } = req.body;
 
   if (!technicienId) {
     return res.status(400).json({ success: false, message: 'Le technicien est obligatoire.', errors: [] });
   }
 
-  const ticket = await prisma.ticket.findUnique({ where: { id: Number(req.params.id) }, include: { agent: true } });
+  const affectation = await chargerAffectation(req.params.id);
 
-  if (!ticket) {
-    return res.status(404).json({ success: false, message: 'Ticket introuvable.', errors: [] });
+  if (!affectation) {
+    return res.status(404).json({ success: false, message: 'Affectation introuvable.', errors: [] });
   }
 
-  if (ticket.agent.structureId !== req.compte.structureId) {
-    return res.status(403).json({ success: false, message: 'Ce ticket n\'appartient pas à votre structure.', errors: [] });
+  if (affectation.responsableId !== req.compte.id) {
+    return res.status(403).json({ success: false, message: 'Cette affectation ne vous appartient pas.', errors: [] });
   }
 
-  if (!ticket.categorieId) {
-    return res.status(409).json({ success: false, message: 'Le ticket doit être catégorisé avant affectation.', errors: [] });
+  if (!estLigneActive(affectation)) {
+    return res.status(409).json({ success: false, message: 'Vous n\'avez plus la main sur ce ticket.', errors: [] });
   }
 
-  if (ticket.statut !== 'SOUMIS') {
-    return res.status(409).json({ success: false, message: 'Ce ticket a déjà une affectation en cours.', errors: [] });
+  if (affectation.technicienId) {
+    return res.status(409).json({ success: false, message: 'Un technicien est deja assigne, utilisez le transfert.', errors: [] });
   }
 
   const technicien = await prisma.technicien.findUnique({ where: { id: Number(technicienId) } });
 
   if (!technicien || technicien.responsableId !== req.compte.id) {
-    return res.status(403).json({ success: false, message: 'Ce technicien ne fait pas partie de votre équipe.', errors: [] });
+    return res.status(403).json({ success: false, message: 'Ce technicien ne fait pas partie de votre equipe.', errors: [] });
   }
 
-  const affectation = await prisma.affectation.create({
-    data: { ticketId: ticket.id, technicienId: technicien.id },
+  if (!technicien.actif) {
+    return res.status(409).json({ success: false, message: 'Ce technicien est desactive.', errors: [] });
+  }
+
+  const affectationMiseAJour = await prisma.$transaction(async (tx) => {
+    const misAJour = await tx.affectation.update({
+      where: { id: affectation.id },
+      data: {
+        technicienId: technicien.id,
+        dateAffectation: new Date(),
+        priorite: req.body.priorite || affectation.priorite,
+      },
+    });
+
+    await mettreAJourStatutTicket(tx, affectation.ticketId, technicien.id, misAJour.statut);
+
+    return misAJour;
   });
 
-  await prisma.ticket.update({ where: { id: ticket.id }, data: { statut: 'AFFECTE' } });
-
-  return res.status(201).json({ success: true, message: 'Ticket affecté.', data: affectation });
+  return res.status(200).json({ success: true, message: 'Technicien assigne.', data: affectationMiseAJour });
 }
 
 async function demarrer(req, res) {
-  const affectation = await prisma.affectation.findUnique({ where: { id: Number(req.params.id) } });
+  const affectation = await chargerAffectation(req.params.id);
 
   if (!affectation) {
     return res.status(404).json({ success: false, message: 'Affectation introuvable.', errors: [] });
@@ -51,24 +103,32 @@ async function demarrer(req, res) {
     return res.status(403).json({ success: false, message: 'Cette affectation ne vous appartient pas.', errors: [] });
   }
 
-  if (affectation.transferer || affectation.escalade) {
+  if (!estLigneActive(affectation)) {
     return res.status(409).json({ success: false, message: 'Vous n\'avez plus la main sur ce ticket.', errors: [] });
   }
 
-  const affectationMiseAJour = await prisma.affectation.update({
-    where: { id: affectation.id },
-    data: { statut: 'EN_TRAITEMENT', dateDebutTrait: new Date() },
+  if (affectation.statut !== 'EN_ATTENTE') {
+    return res.status(409).json({ success: false, message: 'Ce traitement a deja ete demarre.', errors: [] });
+  }
+
+  const affectationMiseAJour = await prisma.$transaction(async (tx) => {
+    const misAJour = await tx.affectation.update({
+      where: { id: affectation.id },
+      data: { statut: 'EN_TRAITEMENT', dateDebutTrait: new Date() },
+    });
+
+    await mettreAJourStatutTicket(tx, affectation.ticketId, affectation.technicienId, 'EN_TRAITEMENT');
+
+    return misAJour;
   });
 
-  await prisma.ticket.update({ where: { id: affectation.ticketId }, data: { statut: 'EN_COURS' } });
-
-  return res.status(200).json({ success: true, message: 'Traitement démarré.', data: affectationMiseAJour });
+  return res.status(200).json({ success: true, message: 'Traitement demarre.', data: affectationMiseAJour });
 }
 
 async function cloturer(req, res) {
   const { commentaire } = req.body;
 
-  const affectation = await prisma.affectation.findUnique({ where: { id: Number(req.params.id) } });
+  const affectation = await chargerAffectation(req.params.id);
 
   if (!affectation) {
     return res.status(404).json({ success: false, message: 'Affectation introuvable.', errors: [] });
@@ -78,215 +138,277 @@ async function cloturer(req, res) {
     return res.status(403).json({ success: false, message: 'Cette affectation ne vous appartient pas.', errors: [] });
   }
 
-  if (affectation.transferer || affectation.escalade) {
+  if (!estLigneActive(affectation)) {
     return res.status(409).json({ success: false, message: 'Vous n\'avez plus la main sur ce ticket.', errors: [] });
   }
 
-  const affectationMiseAJour = await prisma.affectation.update({
-    where: { id: affectation.id },
-    data: { dateFinTrait: new Date(), commentaire: commentaire || affectation.commentaire },
+  if (affectation.statut !== 'EN_TRAITEMENT') {
+    return res.status(409).json({ success: false, message: 'Le traitement doit etre demarre avant la cloture.', errors: [] });
+  }
+
+  const affectationMiseAJour = await prisma.$transaction(async (tx) => {
+    const misAJour = await tx.affectation.update({
+      where: { id: affectation.id },
+      data: {
+        statut: 'CLOTUREE',
+        dateFinTrait: new Date(),
+        commentaire: commentaire || affectation.commentaire,
+      },
+    });
+
+    await mettreAJourStatutTicket(tx, affectation.ticketId, affectation.technicienId, 'CLOTUREE');
+
+    return misAJour;
   });
 
-  await prisma.ticket.update({ where: { id: affectation.ticketId }, data: { statut: 'CLOTURE' } });
-
-  return res.status(200).json({ success: true, message: 'Ticket clôturé.', data: affectationMiseAJour });
+  return res.status(200).json({ success: true, message: 'Ticket cloture.', data: affectationMiseAJour });
 }
 
 async function transferer(req, res) {
   const { nouveauTechnicienId, raisonTransfert, commentaireTransfert } = req.body;
 
   if (!nouveauTechnicienId || !raisonTransfert) {
-    return res.status(400).json({ success: false, message: 'Nouveau technicien et raison obligatoires.', errors: [] });
+    return res.status(400).json({ success: false, message: 'Le nouveau technicien et la raison sont obligatoires.', errors: [] });
   }
 
-  const affectation = await prisma.affectation.findUnique({
-    where: { id: Number(req.params.id) },
-    include: { technicien: true },
-  });
+  const affectation = await chargerAffectation(req.params.id);
 
   if (!affectation) {
     return res.status(404).json({ success: false, message: 'Affectation introuvable.', errors: [] });
   }
 
-  if (affectation.technicien.responsableId !== req.compte.id) {
-    return res.status(403).json({ success: false, message: 'Cette affectation ne relève pas de votre équipe.', errors: [] });
+  if (affectation.responsableId !== req.compte.id) {
+    return res.status(403).json({ success: false, message: 'Cette affectation ne releve pas de votre equipe.', errors: [] });
   }
 
-  if (affectation.transferer || affectation.escalade) {
-    return res.status(409).json({ success: false, message: 'Cette affectation a déjà été transférée ou escaladée.', errors: [] });
+  if (!estLigneActive(affectation)) {
+    return res.status(409).json({ success: false, message: 'Cette affectation a deja ete transferee, escaladee ou retournee.', errors: [] });
+  }
+
+  if (!affectation.technicienId) {
+    return res.status(409).json({ success: false, message: 'Aucun technicien assigne, utilisez l\'assignation au lieu du transfert.', errors: [] });
+  }
+
+  if (affectation.statut === 'CLOTUREE') {
+    return res.status(409).json({ success: false, message: 'Ce ticket est deja cloture.', errors: [] });
+  }
+
+  if (Number(nouveauTechnicienId) === affectation.technicienId) {
+    return res.status(409).json({ success: false, message: 'Ce ticket est deja affecte a ce technicien.', errors: [] });
   }
 
   const nouveauTechnicien = await prisma.technicien.findUnique({ where: { id: Number(nouveauTechnicienId) } });
 
   if (!nouveauTechnicien || nouveauTechnicien.responsableId !== req.compte.id) {
-    return res.status(403).json({ success: false, message: 'Ce technicien ne fait pas partie de votre équipe.', errors: [] });
+    return res.status(403).json({ success: false, message: 'Ce technicien ne fait pas partie de votre equipe.', errors: [] });
+  }
+
+  if (!nouveauTechnicien.actif) {
+    return res.status(409).json({ success: false, message: 'Ce technicien est desactive.', errors: [] });
   }
 
   const nouvelleAffectation = await prisma.$transaction(async (tx) => {
     await tx.affectation.update({
       where: { id: affectation.id },
-      data: { transferer: true, dateTransfert: new Date(), raisonTransfert, commentaireTransfert },
+      data: {
+        transfere: true,
+        dateTransfert: new Date(),
+        raisonTransfert,
+        commentaireTransfert: commentaireTransfert || null,
+      },
     });
 
-    return tx.affectation.create({
-      data: { ticketId: affectation.ticketId, technicienId: nouveauTechnicien.id, affectationPrecedenteId: affectation.id },
+    const creee = await tx.affectation.create({
+      data: {
+        ticketId: affectation.ticketId,
+        responsableId: affectation.responsableId,
+        technicienId: nouveauTechnicien.id,
+        dateAffectation: new Date(),
+        priorite: affectation.priorite,
+        affectationPrecedenteId: affectation.id,
+      },
     });
+
+    await mettreAJourStatutTicket(tx, affectation.ticketId, nouveauTechnicien.id, 'EN_ATTENTE');
+
+    return creee;
   });
 
-  await prisma.ticket.update({ where: { id: affectation.ticketId }, data: { statut: 'AFFECTE' } });
-
-  return res.status(201).json({ success: true, message: 'Ticket transféré.', data: nouvelleAffectation });
+  return res.status(201).json({ success: true, message: 'Ticket transfere.', data: nouvelleAffectation });
 }
 
-async function trouverTechnicienJumeau(responsableId) {
-  const responsable = await prisma.responsableEquipeTechnique.findUnique({ where: { id: responsableId } });
-  if (!responsable) return null;
-  return prisma.technicien.findFirst({ where: { username: `${responsable.username}.technicien` } });
-}
+async function escalader(req, res) {
+  const { codeStructureCible, raisonEscalade, commentaireEscalade } = req.body;
 
-async function trouverTechnicienJumeau(responsableId) {
-  const responsable = await prisma.responsableEquipeTechnique.findUnique({ where: { id: responsableId } });
-  if (!responsable) return null;
-  return prisma.technicien.findFirst({ where: { username: `${responsable.username}.technicien` } });
-}
+  if (!codeStructureCible) {
+    return res.status(400).json({ success: false, message: 'La structure cible est obligatoire.', errors: [] });
+  }
 
-async function effectuerEscalade({ res, ticket, affectationCourante, structureActuelleId, structureCibleId, commentaireEscalade }) {
-  const structureActuelle = await prisma.structure.findUnique({ where: { id: structureActuelleId }, include: { niveau: true } });
-  const structureCible = await prisma.structure.findUnique({ where: { id: Number(structureCibleId) }, include: { niveau: true } });
+  const affectation = await chargerAffectation(req.params.id);
+
+  if (!affectation) {
+    return res.status(404).json({ success: false, message: 'Affectation introuvable.', errors: [] });
+  }
+
+  const estResponsableTitulaire = req.compte.typeCompte === 'RESPONSABLE' && affectation.responsableId === req.compte.id;
+  const estTechnicienTitulaire = req.compte.typeCompte === 'TECHNICIEN' && affectation.technicienId === req.compte.id;
+
+  if (!estResponsableTitulaire && !estTechnicienTitulaire) {
+    return res.status(403).json({ success: false, message: 'Vous n\'avez pas la main sur ce ticket.', errors: [] });
+  }
+
+  if (!estLigneActive(affectation)) {
+    return res.status(409).json({ success: false, message: 'Cette affectation a deja ete transferee, escaladee ou retournee.', errors: [] });
+  }
+
+  if (affectation.statut === 'CLOTUREE') {
+    return res.status(409).json({ success: false, message: 'Ce ticket est deja cloture.', errors: [] });
+  }
+
+  if (aEteRecuParEscalade(affectation)) {
+    return res.status(409).json({
+      success: false,
+      message: 'Cette structure a recu ce ticket par escalade, elle ne peut pas l\'escalader plus haut.',
+      errors: [],
+    });
+  }
+
+  const structureCible = await prisma.structure.findUnique({
+    where: { codeStructure: codeStructureCible },
+    include: { niveau: true },
+  });
 
   if (!structureCible) {
     return res.status(404).json({ success: false, message: 'Structure cible introuvable.', errors: [] });
   }
 
-  const vaVersLeHaut = structureCible.niveau.ordre < structureActuelle.niveau.ordre;
-  const recuParEscalade = affectationCourante.affectationPrecedente?.escalade === true;
+  const structureActuelle = affectation.responsable.structure;
 
-  if (vaVersLeHaut && recuParEscalade) {
-    return res.status(409).json({ success: false, message: 'Cette structure a reçu ce ticket par escalade, elle ne peut pas l\'escalader plus haut.', errors: [] });
+  if (structureCible.id === structureActuelle.id) {
+    return res.status(409).json({ success: false, message: 'La structure cible est la structure actuelle.', errors: [] });
   }
 
-  if (!vaVersLeHaut && !recuParEscalade) {
-    return res.status(409).json({ success: false, message: 'Seul un ticket reçu par escalade peut être renvoyé vers un niveau inférieur.', errors: [] });
+  if (structureCible.niveau.ordre >= structureActuelle.niveau.ordre) {
+    return res.status(409).json({
+      success: false,
+      message: 'L\'escalade doit se faire vers une structure de niveau superieur.',
+      errors: [],
+    });
   }
 
-  const responsableCible = await prisma.responsableEquipeTechnique.findUnique({ where: { structureId: structureCible.id } });
+  const responsableCible = await prisma.responsableEquipeTechnique.findUnique({
+    where: { structureId: structureCible.id },
+  });
 
-  if (!responsableCible) {
-    return res.status(404).json({ success: false, message: 'Cette structure n\'a pas de responsable équipe technique.', errors: [] });
-  }
-
-  const technicienJumeauCible = await trouverTechnicienJumeau(responsableCible.id);
-
-  if (!technicienJumeauCible) {
-    return res.status(500).json({ success: false, message: 'Compte technicien jumeau de la structure cible introuvable.', errors: [] });
+  if (!responsableCible || !responsableCible.actif) {
+    return res.status(409).json({
+      success: false,
+      message: 'Cette structure n\'a pas de responsable equipe technique actif.',
+      errors: [],
+    });
   }
 
   const nouvelleAffectation = await prisma.$transaction(async (tx) => {
     await tx.affectation.update({
-      where: { id: affectationCourante.id },
+      where: { id: affectation.id },
       data: {
-        escalade: vaVersLeHaut,
+        escalade: true,
         dateEscalade: new Date(),
+        raisonEscalade: raisonEscalade || null,
         commentaireEscalade: commentaireEscalade || null,
-        structureCibleEscaladeId: structureCible.id,
       },
     });
 
-    return tx.affectation.create({
-      data: { ticketId: ticket.id, technicienId: technicienJumeauCible.id, affectationPrecedenteId: affectationCourante.id },
+    const creee = await tx.affectation.create({
+      data: {
+        ticketId: affectation.ticketId,
+        responsableId: responsableCible.id,
+        priorite: affectation.priorite,
+        affectationPrecedenteId: affectation.id,
+      },
     });
+
+    await mettreAJourStatutTicket(tx, affectation.ticketId, null, 'EN_ATTENTE');
+
+    return creee;
   });
 
-  await prisma.ticket.update({ where: { id: ticket.id }, data: { statut: 'AFFECTE' } });
-
-  return res.status(200).json({
-    success: true,
-    message: vaVersLeHaut ? 'Ticket escaladé.' : 'Ticket renvoyé au niveau inférieur.',
-    data: nouvelleAffectation,
-  });
+  return res.status(201).json({ success: true, message: 'Ticket escalade.', data: nouvelleAffectation });
 }
 
-async function escaladerDepuisAffectation(req, res) {
-  const { structureCibleId, commentaireEscalade } = req.body;
+async function retourner(req, res) {
+  const { raisonRetour, commentaireRetour } = req.body;
 
-  if (!structureCibleId) {
-    return res.status(400).json({ success: false, message: 'La structure cible est obligatoire.', errors: [] });
+  if (!raisonRetour) {
+    return res.status(400).json({ success: false, message: 'La raison du retour est obligatoire.', errors: [] });
   }
 
-  const affectationCourante = await prisma.affectation.findUnique({
-    where: { id: Number(req.params.id) },
-    include: {
-      technicien: { include: { responsable: true } },
-      affectationPrecedente: true,
-      ticket: true,
-    },
-  });
+  const affectation = await chargerAffectation(req.params.id);
 
-  if (!affectationCourante) {
+  if (!affectation) {
     return res.status(404).json({ success: false, message: 'Affectation introuvable.', errors: [] });
   }
 
-  const estProprietaireTechnicien = req.compte.typeCompte === 'TECHNICIEN' && affectationCourante.technicienId === req.compte.id;
-  const estResponsableEquipe = req.compte.typeCompte === 'RESPONSABLE' && affectationCourante.technicien.responsableId === req.compte.id;
-
-  if (!estProprietaireTechnicien && !estResponsableEquipe) {
-    return res.status(403).json({ success: false, message: 'Vous n\'avez pas la main sur ce ticket.', errors: [] });
+  if (affectation.responsableId !== req.compte.id) {
+    return res.status(403).json({ success: false, message: 'Cette affectation ne vous appartient pas.', errors: [] });
   }
 
-  if (affectationCourante.transferer || affectationCourante.escalade) {
-    return res.status(409).json({ success: false, message: 'Ce ticket a déjà été transféré ou escaladé.', errors: [] });
+  if (!estLigneActive(affectation)) {
+    return res.status(409).json({ success: false, message: 'Cette affectation a deja ete transferee, escaladee ou retournee.', errors: [] });
   }
 
-  return effectuerEscalade({
-    res,
-    ticket: affectationCourante.ticket,
-    affectationCourante,
-    structureActuelleId: affectationCourante.technicien.responsable.structureId,
-    structureCibleId,
-    commentaireEscalade,
+  if (affectation.statut === 'CLOTUREE') {
+    return res.status(409).json({ success: false, message: 'Ce ticket est deja cloture.', errors: [] });
+  }
+
+  if (!aEteRecuParEscalade(affectation)) {
+    return res.status(409).json({
+      success: false,
+      message: 'Seul un ticket recu par escalade peut etre retourne a la structure d\'origine.',
+      errors: [],
+    });
+  }
+
+  const responsableOrigineId = affectation.affectationPrecedente.responsableId;
+
+  const responsableOrigine = await prisma.responsableEquipeTechnique.findUnique({
+    where: { id: responsableOrigineId },
   });
+
+  if (!responsableOrigine || !responsableOrigine.actif) {
+    return res.status(409).json({
+      success: false,
+      message: 'Le responsable de la structure d\'origine n\'est plus actif.',
+      errors: [],
+    });
+  }
+
+  const nouvelleAffectation = await prisma.$transaction(async (tx) => {
+    await tx.affectation.update({
+      where: { id: affectation.id },
+      data: {
+        retourne: true,
+        dateRetour: new Date(),
+        raisonRetour,
+        commentaireRetour: commentaireRetour || null,
+      },
+    });
+
+    const creee = await tx.affectation.create({
+      data: {
+        ticketId: affectation.ticketId,
+        responsableId: responsableOrigine.id,
+        priorite: affectation.priorite,
+        affectationPrecedenteId: affectation.id,
+      },
+    });
+
+    await mettreAJourStatutTicket(tx, affectation.ticketId, null, 'EN_ATTENTE');
+
+    return creee;
+  });
+
+  return res.status(201).json({ success: true, message: 'Ticket retourne a la structure d\'origine.', data: nouvelleAffectation });
 }
 
-async function escaladerDepuisTicket(req, res) {
-  const { structureCibleId, commentaireEscalade } = req.body;
-
-  if (!structureCibleId) {
-    return res.status(400).json({ success: false, message: 'La structure cible est obligatoire.', errors: [] });
-  }
-
-  const ticket = await prisma.ticket.findUnique({ where: { id: Number(req.params.id) }, include: { agent: true } });
-
-  if (!ticket) {
-    return res.status(404).json({ success: false, message: 'Ticket introuvable.', errors: [] });
-  }
-
-  if (ticket.agent.structureId !== req.compte.structureId) {
-    return res.status(403).json({ success: false, message: 'Ce ticket n\'appartient pas à votre structure.', errors: [] });
-  }
-
-  if (ticket.statut !== 'SOUMIS') {
-    return res.status(409).json({ success: false, message: 'Ce ticket a déjà une affectation en cours, utilisez la route d\'escalade depuis une affectation.', errors: [] });
-  }
-
-  const technicienJumeau = await trouverTechnicienJumeau(req.compte.id);
-
-  if (!technicienJumeau) {
-    return res.status(500).json({ success: false, message: 'Compte technicien jumeau introuvable.', errors: [] });
-  }
-
-  const affectationCourante = await prisma.affectation.create({
-    data: { ticketId: ticket.id, technicienId: technicienJumeau.id },
-    include: { affectationPrecedente: true },
-  });
-
-  return effectuerEscalade({
-    res,
-    ticket,
-    affectationCourante,
-    structureActuelleId: req.compte.structureId,
-    structureCibleId,
-    commentaireEscalade,
-  });
-}
-
-module.exports = { affecter, demarrer, cloturer, transferer, escaladerDepuisAffectation, escaladerDepuisTicket };
+module.exports = { assignerTechnicien, demarrer, cloturer, transferer, escalader, retourner };

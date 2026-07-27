@@ -1,58 +1,69 @@
 const cron = require('node-cron');
 const prisma = require('../prisma/client');
+const { envoyerRelanceAutomatique } = require('../utils/email');
+
+const DELAI_JOURS = 2;
 
 async function verifierRetards() {
   const seuil = new Date();
-  seuil.setDate(seuil.getDate() - 2);
+  seuil.setDate(seuil.getDate() - DELAI_JOURS);
 
   const affectationsEnRetard = await prisma.affectation.findMany({
     where: {
-      statut: 'AFFECTE',
+      statut: 'EN_ATTENTE',
+      technicienId: { not: null },
       dateDebutTrait: null,
-      transferer: false,
-      escalade: false,
       dateAffectation: { lte: seuil },
-      affectationSuivante: null,
+      relanceAutoEnvoyee: false,
+      transfere: false,
+      escalade: false,
+      retourne: false,
     },
-    include: { technicien: { include: { responsable: true } }, ticket: true },
+    include: {
+      ticket: true,
+      technicien: { include: { agent: true } },
+      responsable: { include: { agent: true } },
+    },
   });
 
   for (const affectation of affectationsEnRetard) {
-    const dejaNotifieTechnicien = await prisma.notification.findFirst({
-      where: { destinataireTypeCompte: 'TECHNICIEN', destinataireId: affectation.technicienId, ticketId: affectation.ticketId, titre: 'Retard de traitement' },
-    });
+    const technicien = affectation.technicien;
+    const responsable = affectation.responsable;
 
-    if (!dejaNotifieTechnicien) {
-      await prisma.notification.create({
-        data: {
-          destinataireTypeCompte: 'TECHNICIEN',
-          destinataireId: affectation.technicienId,
-          titre: 'Retard de traitement',
-          message: `Le ticket ${affectation.ticket.reference} n'a pas été démarré depuis plus de 2 jours.`,
-          ticketId: affectation.ticketId,
-        },
-      });
-
-      await prisma.notification.create({
-        data: {
-          destinataireTypeCompte: 'RESPONSABLE',
-          destinataireId: affectation.technicien.responsableId,
-          titre: 'Retard de traitement dans votre équipe',
-          message: `Le ticket ${affectation.ticket.reference}, affecté à ${affectation.technicien.username}, n'a pas été démarré depuis plus de 2 jours.`,
-          ticketId: affectation.ticketId,
-        },
-      });
+    if (technicien && technicien.agent) {
+      await envoyerRelanceAutomatique(
+        technicien.agent.email,
+        `${technicien.agent.prenom} ${technicien.agent.nom}`,
+        affectation.ticket.reference,
+        affectation.ticket.titre,
+        DELAI_JOURS,
+      );
     }
+
+    if (responsable && responsable.agent) {
+      await envoyerRelanceAutomatique(
+        responsable.agent.email,
+        `${responsable.agent.prenom} ${responsable.agent.nom}`,
+        affectation.ticket.reference,
+        affectation.ticket.titre,
+        DELAI_JOURS,
+      );
+    }
+
+    await prisma.affectation.update({
+      where: { id: affectation.id },
+      data: { relanceAutoEnvoyee: true },
+    });
   }
 
   if (affectationsEnRetard.length > 0) {
-    console.log(`Relance : ${affectationsEnRetard.length} affectation(s) vérifiée(s), notifications créées si nécessaire.`);
+    console.log(`Relance : ${affectationsEnRetard.length} affectation(s) en retard, emails envoyes.`);
   }
 }
 
 function demarrerTacheRelance() {
   cron.schedule('0 * * * *', verifierRetards);
-  console.log('Tâche de relance démarrée (vérification toutes les heures).');
+  console.log('Tache de relance demarree (verification toutes les heures).');
 }
 
 module.exports = { demarrerTacheRelance, verifierRetards };

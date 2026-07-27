@@ -1,23 +1,35 @@
 const prisma = require('../prisma/client');
 
+function masquerOrdre(structure) {
+  if (!structure.niveau) {
+    return structure;
+  }
+
+  const { ordre, ...niveauSansOrdre } = structure.niveau;
+
+  return { ...structure, niveau: niveauSansOrdre };
+}
+
 async function lister(req, res) {
   const structures = await prisma.structure.findMany({
     include: { type: true, niveau: true },
-    orderBy: { nomstructure: 'asc' },
+    orderBy: { designation: 'asc' },
   });
-  return res.status(200).json({ success: true, data: structures });
+
+  return res.status(200).json({ success: true, data: structures.map(masquerOrdre) });
 }
 
 async function creer(req, res) {
-  const { nomstructure, typeId, niveauId, nomResponsable, prenomResponsable, mailResponsable, numResponsable } = req.body;
+  const { codeStructure, designation, typeId, niveauId, nomResponsable, prenomResponsable, mailResponsable, numResponsable } = req.body;
 
-  if (!nomstructure || !typeId || !niveauId) {
+  if (!codeStructure || !designation || !typeId || !niveauId) {
     return res.status(400).json({ success: false, message: 'Champs obligatoires manquants.', errors: [] });
   }
 
   const structure = await prisma.structure.create({
     data: {
-      nomstructure,
+      codeStructure,
+      designation,
       typeId: Number(typeId),
       niveauId: Number(niveauId),
       nomResponsable,
@@ -27,16 +39,17 @@ async function creer(req, res) {
     },
   });
 
-  return res.status(201).json({ success: true, message: 'Structure créée.', data: structure });
+  return res.status(201).json({ success: true, message: 'Structure creee.', data: structure });
 }
 
 async function modifier(req, res) {
-  const { nomstructure, typeId, niveauId, nomResponsable, prenomResponsable, mailResponsable, numResponsable } = req.body;
+  const { codeStructure, designation, typeId, niveauId, nomResponsable, prenomResponsable, mailResponsable, numResponsable } = req.body;
 
   const structure = await prisma.structure.update({
     where: { id: Number(req.params.id) },
     data: {
-      nomstructure,
+      codeStructure,
+      designation,
       typeId: typeId ? Number(typeId) : undefined,
       niveauId: niveauId ? Number(niveauId) : undefined,
       nomResponsable,
@@ -46,19 +59,33 @@ async function modifier(req, res) {
     },
   });
 
-  return res.status(200).json({ success: true, message: 'Structure modifiée.', data: structure });
+  return res.status(200).json({ success: true, message: 'Structure modifiee.', data: structure });
 }
 
 async function supprimer(req, res) {
-  const agentsLies = await prisma.agent.count({ where: { structureId: Number(req.params.id) } });
+  const structureId = Number(req.params.id);
+
+  const agentsLies = await prisma.agent.count({ where: { structureId } });
 
   if (agentsLies > 0) {
-    return res.status(409).json({ success: false, message: 'Impossible de supprimer une structure liée à des agents.', errors: [] });
+    return res.status(409).json({ success: false, message: 'Impossible de supprimer une structure liee a des agents.', errors: [] });
   }
 
-  await prisma.structure.delete({ where: { id: Number(req.params.id) } });
+  const responsableLie = await prisma.responsableEquipeTechnique.count({ where: { structureId } });
 
-  return res.status(200).json({ success: true, message: 'Structure supprimée.' });
+  if (responsableLie > 0) {
+    return res.status(409).json({ success: false, message: 'Impossible de supprimer une structure qui a un responsable equipe technique.', errors: [] });
+  }
+
+  const pointFocalLie = await prisma.pointFocal.count({ where: { structureId } });
+
+  if (pointFocalLie > 0) {
+    return res.status(409).json({ success: false, message: 'Impossible de supprimer une structure qui a un point focal.', errors: [] });
+  }
+
+  await prisma.structure.delete({ where: { id: structureId } });
+
+  return res.status(200).json({ success: true, message: 'Structure supprimee.' });
 }
 
 async function escaladables(req, res) {
@@ -77,7 +104,7 @@ async function escaladables(req, res) {
     orderBy: { niveau: { ordre: 'asc' } },
   });
 
-  return res.status(200).json({ success: true, data: structures });
+  return res.status(200).json({ success: true, data: structures.map(masquerOrdre) });
 }
 
 async function retournables(req, res) {
@@ -96,7 +123,7 @@ async function retournables(req, res) {
     orderBy: { niveau: { ordre: 'asc' } },
   });
 
-  return res.status(200).json({ success: true, data: structures });
+  return res.status(200).json({ success: true, data: structures.map(masquerOrdre) });
 }
 
 module.exports = { lister, creer, modifier, supprimer, escaladables, retournables };

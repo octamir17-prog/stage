@@ -1,128 +1,229 @@
-const bcrypt = require('bcrypt');
 const prisma = require('../prisma/client');
+const { TABLE_PAR_ROLE, LIBELLE_ROLE } = require('../utils/roles');
+const { envoyerLienPourEmplacement } = require('../utils/activation');
 
-async function creerResponsable(req, res) {
-  const { username, motdepasse, telephone, structureId } = req.body;
-
-  if (!username || !motdepasse || !telephone || !structureId) {
-    return res.status(400).json({ success: false, message: 'Champs obligatoires manquants.', errors: [] });
+function statutEmplacement(compte) {
+  if (compte.motdepasse) {
+    return 'ACTIVE';
   }
 
-  const structure = await prisma.structure.findUnique({ where: { id: Number(structureId) } });
+  if (compte.agentMatricule) {
+    return 'ATTRIBUE';
+  }
+
+  return 'LIBRE';
+}
+
+function retirerChampsSensibles(compte) {
+  const { motdepasse, tokenActivation, tokenActivationExpiration, ...reste } = compte;
+  return reste;
+}
+
+async function listerEmplacements(req, res) {
+  const { role, codeStructure, statut } = req.query;
+
+  if (!role || !TABLE_PAR_ROLE[role]) {
+    return res.status(400).json({ success: false, message: 'Role invalide.', errors: [] });
+  }
+
+  const table = TABLE_PAR_ROLE[role]();
+  const where = {};
+
+  if (role === 'TECHNICIEN') {
+    if (codeStructure) {
+      const structure = await prisma.structure.findUnique({ where: { codeStructure } });
+      const responsable = structure
+        ? await prisma.responsableEquipeTechnique.findUnique({ where: { structureId: structure.id } })
+        : null;
+      where.responsableId = responsable ? responsable.id : 0;
+    }
+  } else if (codeStructure) {
+    where.structure = { codeStructure };
+  }
+
+  const emplacements = await table.findMany({
+    where,
+    include: role === 'TECHNICIEN' ? { responsable: { include: { structure: true } } } : { structure: true },
+    orderBy: { username: 'asc' },
+  });
+
+  const donnees = emplacements
+    .map((emplacement) => ({
+      id: emplacement.id,
+      username: emplacement.username,
+      statut: statutEmplacement(emplacement),
+      structure: role === 'TECHNICIEN' ? emplacement.responsable.structure : emplacement.structure,
+      agentMatricule: emplacement.agentMatricule,
+    }))
+    .filter((emplacement) => !statut || emplacement.statut === statut);
+
+  return res.status(200).json({ success: true, data: donnees });
+}
+
+async function creerEmplacement(req, res) {
+  const { role, codeStructure } = req.body;
+
+  if (!role || !TABLE_PAR_ROLE[role] || !codeStructure) {
+    return res.status(400).json({ success: false, message: 'Role et structure sont obligatoires.', errors: [] });
+  }
+
+  const structure = await prisma.structure.findUnique({ where: { codeStructure } });
 
   if (!structure) {
     return res.status(404).json({ success: false, message: 'Structure introuvable.', errors: [] });
   }
 
-  const usernameExistant = await prisma.responsableEquipeTechnique.findUnique({ where: { username } });
+  if (role === 'RESPONSABLE' || role === 'POINT_FOCAL') {
+    const table = TABLE_PAR_ROLE[role]();
+    const existant = await table.findUnique({ where: { structureId: structure.id } });
 
-  if (usernameExistant) {
-    return res.status(409).json({ success: false, message: 'Ce nom d\'utilisateur est déjà pris.', errors: [] });
+    if (existant) {
+      return res.status(409).json({
+        success: false,
+        message: `Cette structure a deja un emplacement ${LIBELLE_ROLE[role]}.`,
+        errors: [],
+      });
+    }
+
+    const suffixe = role === 'POINT_FOCAL' ? 'PF' : 'RES';
+
+    const emplacement = await table.create({
+      data: { username: `${codeStructure}-${suffixe}1`, structureId: structure.id },
+    });
+
+    return res.status(201).json({ success: true, message: 'Emplacement cree.', data: emplacement });
   }
 
-  const motdepasseHache = await bcrypt.hash(motdepasse, 10);
+  const responsable = await prisma.responsableEquipeTechnique.findUnique({ where: { structureId: structure.id } });
 
-  const responsable = await prisma.responsableEquipeTechnique.create({
-    data: { username, motdepasse: motdepasseHache, telephone, structureId: Number(structureId), createdBy: `ADMIN:${req.compte.id}` },
+  if (!responsable) {
+    return res.status(409).json({
+      success: false,
+      message: 'Cette structure n\'a pas encore d\'emplacement Responsable.',
+      errors: [],
+    });
+  }
+
+  const techniciensExistants = await prisma.technicien.count({ where: { responsableId: responsable.id } });
+
+  const emplacement = await prisma.technicien.create({
+    data: { username: `${codeStructure}-TEC${techniciensExistants + 1}`, responsableId: responsable.id },
   });
 
-  await prisma.technicien.create({
+  return res.status(201).json({ success: true, message: 'Emplacement cree.', data: emplacement });
+}
+
+async function attribuer(req, res) {
+  const { agentMatricule, role, username } = req.body;
+
+  if (!agentMatricule || !role || !TABLE_PAR_ROLE[role] || !username) {
+    return res.status(400).json({ success: false, message: 'agentMatricule, role et username sont obligatoires.', errors: [] });
+  }
+
+  const agent = await prisma.agent.findUnique({ where: { matricule: Number(agentMatricule) } });
+
+  if (!agent || !agent.actif) {
+    return res.status(404).json({ success: false, message: 'Agent introuvable ou inactif.', errors: [] });
+  }
+
+  const table = TABLE_PAR_ROLE[role]();
+  const emplacement = await table.findUnique({ where: { username } });
+
+  if (!emplacement) {
+    return res.status(404).json({ success: false, message: 'Emplacement introuvable.', errors: [] });
+  }
+
+  if (emplacement.agentMatricule) {
+    return res.status(409).json({ success: false, message: 'Cet emplacement est deja attribue.', errors: [] });
+  }
+
+  const dejaTitulaire = await table.findUnique({ where: { agentMatricule: agent.matricule } });
+
+  if (dejaTitulaire) {
+    return res.status(409).json({
+      success: false,
+      message: `Cet agent detient deja un compte ${LIBELLE_ROLE[role]}.`,
+      errors: [],
+    });
+  }
+
+  await table.update({
+    where: { id: emplacement.id },
+    data: { agentMatricule: agent.matricule, telephone: agent.numero },
+  });
+
+  await envoyerLienPourEmplacement(role, emplacement.id);
+
+  return res.status(200).json({ success: true, message: 'Agent rattache, lien d\'activation envoye.' });
+}
+
+async function renvoyerLien(req, res) {
+  const { role, username } = req.body;
+
+  if (!role || !TABLE_PAR_ROLE[role] || !username) {
+    return res.status(400).json({ success: false, message: 'Role et username sont obligatoires.', errors: [] });
+  }
+
+  const table = TABLE_PAR_ROLE[role]();
+  const emplacement = await table.findUnique({ where: { username } });
+
+  if (!emplacement) {
+    return res.status(404).json({ success: false, message: 'Emplacement introuvable.', errors: [] });
+  }
+
+  if (!emplacement.agentMatricule) {
+    return res.status(409).json({ success: false, message: 'Cet emplacement n\'est rattache a aucun agent.', errors: [] });
+  }
+
+  await table.update({ where: { id: emplacement.id }, data: { motdepasse: null } });
+  await envoyerLienPourEmplacement(role, emplacement.id);
+
+  return res.status(200).json({ success: true, message: 'Nouveau lien envoye.' });
+}
+
+async function liberer(req, res) {
+  const { role, username } = req.body;
+
+  if (!role || !TABLE_PAR_ROLE[role] || !username) {
+    return res.status(400).json({ success: false, message: 'Role et username sont obligatoires.', errors: [] });
+  }
+
+  const table = TABLE_PAR_ROLE[role]();
+  const emplacement = await table.findUnique({ where: { username } });
+
+  if (!emplacement) {
+    return res.status(404).json({ success: false, message: 'Emplacement introuvable.', errors: [] });
+  }
+
+  await table.update({
+    where: { id: emplacement.id },
     data: {
-      username: `${username}.technicien`,
-      motdepasse: motdepasseHache,
-      telephone,
-      responsableId: responsable.id,
-      createdBy: `ADMIN:${req.compte.id}`,
+      agentMatricule: null,
+      motdepasse: null,
+      tokenActivation: null,
+      tokenActivationExpiration: null,
+      username: `LIBRE-${emplacement.id}`,
     },
   });
 
-  const { motdepasse: _, ...responsableSansMotDePasse } = responsable;
-
-  return res.status(201).json({
-    success: true,
-    message: 'Responsable créé, compte technicien jumeau créé automatiquement.',
-    data: responsableSansMotDePasse,
-  });
-}
-
-async function creerTechnicien(req, res) {
-  const { username, motdepasse, telephone, responsableId } = req.body;
-
-  if (!username || !motdepasse || !telephone || !responsableId) {
-    return res.status(400).json({ success: false, message: 'Champs obligatoires manquants.', errors: [] });
-  }
-
-  const responsable = await prisma.responsableEquipeTechnique.findUnique({ where: { id: Number(responsableId) } });
-
-  if (!responsable) {
-    return res.status(404).json({ success: false, message: 'Responsable introuvable.', errors: [] });
-  }
-
-  const usernameExistant = await prisma.technicien.findUnique({ where: { username } });
-
-  if (usernameExistant) {
-    return res.status(409).json({ success: false, message: 'Ce nom d\'utilisateur est déjà pris.', errors: [] });
-  }
-
-  const motdepasseHache = await bcrypt.hash(motdepasse, 10);
-
-  const technicien = await prisma.technicien.create({
-    data: { username, motdepasse: motdepasseHache, telephone, responsableId: Number(responsableId), createdBy: `ADMIN:${req.compte.id}` },
-  });
-
-  const { motdepasse: _, ...technicienSansMotDePasse } = technicien;
-
-  return res.status(201).json({ success: true, message: 'Technicien créé.', data: technicienSansMotDePasse });
-}
-
-async function creerPointFocal(req, res) {
-  const { nom, prenom, username, motdepasse, telephone, structureId } = req.body;
-
-  if (!nom || !prenom || !username || !motdepasse || !telephone || !structureId) {
-    return res.status(400).json({ success: false, message: 'Champs obligatoires manquants.', errors: [] });
-  }
-
-  const structure = await prisma.structure.findUnique({ where: { id: Number(structureId) } });
-
-  if (!structure) {
-    return res.status(404).json({ success: false, message: 'Structure introuvable.', errors: [] });
-  }
-
-  const structureDejaPourvue = await prisma.pointFocal.findUnique({ where: { structureId: Number(structureId) } });
-
-  if (structureDejaPourvue) {
-    return res.status(409).json({ success: false, message: 'Cette structure a déjà un point focal.', errors: [] });
-  }
-
-  const usernameExistant = await prisma.pointFocal.findUnique({ where: { username } });
-
-  if (usernameExistant) {
-    return res.status(409).json({ success: false, message: 'Ce nom d\'utilisateur est déjà pris.', errors: [] });
-  }
-
-  const motdepasseHache = await bcrypt.hash(motdepasse, 10);
-
-  const pointFocal = await prisma.pointFocal.create({
-    data: { nom, prenom, username, motdepasse: motdepasseHache, telephone, structureId: Number(structureId), createdBy: `ADMIN:${req.compte.id}` },
-  });
-
-  const { motdepasse: _, ...pointFocalSansMotDePasse } = pointFocal;
-
-  return res.status(201).json({ success: true, message: 'Point focal créé.', data: pointFocalSansMotDePasse });
+  return res.status(200).json({ success: true, message: 'Emplacement libere.' });
 }
 
 async function listerResponsables(req, res) {
   const responsables = await prisma.responsableEquipeTechnique.findMany({
     include: { structure: true },
-    orderBy: { dateCreation: 'desc' },
+    orderBy: { username: 'asc' },
   });
-  const sansMotDePasse = responsables.map(({ motdepasse, ...reste }) => reste);
-  return res.status(200).json({ success: true, data: sansMotDePasse });
+
+  return res.status(200).json({ success: true, data: responsables.map(retirerChampsSensibles) });
 }
 
 async function listerTechniciens(req, res) {
   const filtres = {};
-  if (req.query.responsableId) filtres.responsableId = Number(req.query.responsableId);
+
+  if (req.query.responsableId) {
+    filtres.responsableId = Number(req.query.responsableId);
+  }
 
   if (req.compte.typeCompte === 'RESPONSABLE') {
     filtres.responsableId = req.compte.id;
@@ -130,19 +231,20 @@ async function listerTechniciens(req, res) {
 
   const techniciens = await prisma.technicien.findMany({
     where: filtres,
-    orderBy: { dateCreation: 'desc' },
+    include: { responsable: { include: { structure: true } } },
+    orderBy: { username: 'asc' },
   });
-  const sansMotDePasse = techniciens.map(({ motdepasse, ...reste }) => reste);
-  return res.status(200).json({ success: true, data: sansMotDePasse });
+
+  return res.status(200).json({ success: true, data: techniciens.map(retirerChampsSensibles) });
 }
 
 async function listerPointsFocaux(req, res) {
   const pointsFocaux = await prisma.pointFocal.findMany({
     include: { structure: true },
-    orderBy: { dateCreation: 'desc' },
+    orderBy: { username: 'asc' },
   });
-  const sansMotDePasse = pointsFocaux.map(({ motdepasse, ...reste }) => reste);
-  return res.status(200).json({ success: true, data: sansMotDePasse });
+
+  return res.status(200).json({ success: true, data: pointsFocaux.map(retirerChampsSensibles) });
 }
 
 async function desactiverResponsable(req, res) {
@@ -152,16 +254,13 @@ async function desactiverResponsable(req, res) {
     return res.status(404).json({ success: false, message: 'Responsable introuvable.', errors: [] });
   }
 
-  const technicienJumeau = await prisma.technicien.findFirst({ where: { username: `${responsable.username}.technicien` } });
-
-  await prisma.$transaction(async (tx) => {
-    await tx.responsableEquipeTechnique.update({ where: { id: responsable.id }, data: { actif: false } });
-    if (technicienJumeau) {
-      await tx.technicien.update({ where: { id: technicienJumeau.id }, data: { actif: false } });
-    }
+  await prisma.responsableEquipeTechnique.update({ where: { id: responsable.id }, data: { actif: false } });
+  await prisma.sessionToken.updateMany({
+    where: { typeCompte: 'RESPONSABLE', compteId: responsable.id },
+    data: { revoque: true },
   });
 
-  return res.status(200).json({ success: true, message: 'Responsable désactivé.' });
+  return res.status(200).json({ success: true, message: 'Responsable desactive.' });
 }
 
 async function reactiverResponsable(req, res) {
@@ -171,16 +270,9 @@ async function reactiverResponsable(req, res) {
     return res.status(404).json({ success: false, message: 'Responsable introuvable.', errors: [] });
   }
 
-  const technicienJumeau = await prisma.technicien.findFirst({ where: { username: `${responsable.username}.technicien` } });
+  await prisma.responsableEquipeTechnique.update({ where: { id: responsable.id }, data: { actif: true } });
 
-  await prisma.$transaction(async (tx) => {
-    await tx.responsableEquipeTechnique.update({ where: { id: responsable.id }, data: { actif: true } });
-    if (technicienJumeau) {
-      await tx.technicien.update({ where: { id: technicienJumeau.id }, data: { actif: true } });
-    }
-  });
-
-  return res.status(200).json({ success: true, message: 'Responsable réactivé.' });
+  return res.status(200).json({ success: true, message: 'Responsable reactive.' });
 }
 
 async function desactiverTechnicien(req, res) {
@@ -191,8 +283,12 @@ async function desactiverTechnicien(req, res) {
   }
 
   await prisma.technicien.update({ where: { id: technicien.id }, data: { actif: false } });
+  await prisma.sessionToken.updateMany({
+    where: { typeCompte: 'TECHNICIEN', compteId: technicien.id },
+    data: { revoque: true },
+  });
 
-  return res.status(200).json({ success: true, message: 'Technicien désactivé.' });
+  return res.status(200).json({ success: true, message: 'Technicien desactive.' });
 }
 
 async function reactiverTechnicien(req, res) {
@@ -204,7 +300,7 @@ async function reactiverTechnicien(req, res) {
 
   await prisma.technicien.update({ where: { id: technicien.id }, data: { actif: true } });
 
-  return res.status(200).json({ success: true, message: 'Technicien réactivé.' });
+  return res.status(200).json({ success: true, message: 'Technicien reactive.' });
 }
 
 async function desactiverPointFocal(req, res) {
@@ -215,8 +311,12 @@ async function desactiverPointFocal(req, res) {
   }
 
   await prisma.pointFocal.update({ where: { id: pointFocal.id }, data: { actif: false } });
+  await prisma.sessionToken.updateMany({
+    where: { typeCompte: 'POINT_FOCAL', compteId: pointFocal.id },
+    data: { revoque: true },
+  });
 
-  return res.status(200).json({ success: true, message: 'Point focal désactivé.' });
+  return res.status(200).json({ success: true, message: 'Point focal desactive.' });
 }
 
 async function reactiverPointFocal(req, res) {
@@ -228,13 +328,15 @@ async function reactiverPointFocal(req, res) {
 
   await prisma.pointFocal.update({ where: { id: pointFocal.id }, data: { actif: true } });
 
-  return res.status(200).json({ success: true, message: 'Point focal réactivé.' });
+  return res.status(200).json({ success: true, message: 'Point focal reactive.' });
 }
 
 module.exports = {
-  creerResponsable,
-  creerTechnicien,
-  creerPointFocal,
+  listerEmplacements,
+  creerEmplacement,
+  attribuer,
+  renvoyerLien,
+  liberer,
   listerResponsables,
   listerTechniciens,
   listerPointsFocaux,

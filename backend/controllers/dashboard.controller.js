@@ -1,5 +1,14 @@
 const prisma = require('../prisma/client');
 
+const LIGNE_ACTIVE = { transfere: false, escalade: false, retourne: false };
+
+function debutDuMois() {
+  const date = new Date();
+  date.setDate(1);
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
+
 async function utilisateur(req, res) {
   const agentMatricule = req.compte.agentMatricule;
 
@@ -17,10 +26,14 @@ async function technicien(req, res) {
   const technicienId = req.compte.id;
 
   const [affectes, enTraitement, cloturesDuMois] = await Promise.all([
-    prisma.affectation.count({ where: { technicienId, affectationSuivante: null } }),
-    prisma.affectation.count({ where: { technicienId, statut: 'EN_TRAITEMENT', affectationSuivante: null } }),
     prisma.affectation.count({
-      where: { technicienId, dateFinTrait: { gte: new Date(new Date().setDate(1)) } },
+      where: { technicienId, statut: 'EN_ATTENTE', ...LIGNE_ACTIVE },
+    }),
+    prisma.affectation.count({
+      where: { technicienId, statut: 'EN_TRAITEMENT', ...LIGNE_ACTIVE },
+    }),
+    prisma.affectation.count({
+      where: { technicienId, statut: 'CLOTUREE', dateFinTrait: { gte: debutDuMois() } },
     }),
   ]);
 
@@ -28,15 +41,21 @@ async function technicien(req, res) {
 }
 
 async function responsable(req, res) {
-  const structureId = req.compte.structureId;
+  const responsableId = req.compte.id;
 
   const [nonAffectes, enCours, escaladesEnCours, techniciensCount] = await Promise.all([
-    prisma.ticket.count({ where: { agent: { structureId }, statut: 'SOUMIS' } }),
-    prisma.ticket.count({ where: { agent: { structureId }, statut: { in: ['AFFECTE', 'EN_COURS'] } } }),
     prisma.affectation.count({
-      where: { technicien: { responsableId: req.compte.id }, escalade: true, affectationSuivante: { isNot: null } },
+      where: { responsableId, technicienId: null, ...LIGNE_ACTIVE },
     }),
-    prisma.technicien.count({ where: { responsableId: req.compte.id } }),
+    prisma.affectation.count({
+      where: { responsableId, technicienId: { not: null }, statut: { in: ['EN_ATTENTE', 'EN_TRAITEMENT'] }, ...LIGNE_ACTIVE },
+    }),
+    prisma.affectation.count({
+      where: { responsableId, escalade: true },
+    }),
+    prisma.technicien.count({
+      where: { responsableId, actif: true },
+    }),
   ]);
 
   return res.status(200).json({ success: true, data: { nonAffectes, enCours, escaladesEnCours, techniciensCount } });

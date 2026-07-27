@@ -1,6 +1,5 @@
 generator client {
-  provider     = "prisma-client-js"
-  moduleFormat = "cjs"
+  provider = "prisma-client-js"
 }
 
 datasource db {
@@ -20,8 +19,9 @@ enum StatutTicket {
 }
 
 enum StatutAffectation {
-  AFFECTE
+  EN_ATTENTE
   EN_TRAITEMENT
+  CLOTUREE
 }
 
 model Admin {
@@ -53,12 +53,13 @@ model Type {
 }
 
 model Structure {
-  id                 Int     @id @default(autoincrement())
-  nomstructure       String
-  nomResponsable     String?
-  prenomResponsable  String?
-  mailResponsable    String?
-  numResponsable     String?
+  id                Int     @id @default(autoincrement())
+  codeStructure     String  @unique
+  designation       String
+  nomResponsable    String?
+  prenomResponsable String?
+  mailResponsable   String?
+  numResponsable    String?
 
   typeId Int
   type   Type @relation(fields: [typeId], references: [id])
@@ -66,26 +67,32 @@ model Structure {
   niveauId Int
   niveau   Niveau @relation(fields: [niveauId], references: [id])
 
-  agents                    Agent[]
-  responsable               ResponsableEquipeTechnique?
-  pointFocal                PointFocal?
-  affectationsCibleEscalade Affectation[]               @relation("StructureCibleEscalade")
+  agents      Agent[]
+  responsable ResponsableEquipeTechnique?
+  pointFocal  PointFocal?
 
   @@map("structures")
 }
 
 model PointFocal {
-  id           Int      @id @default(autoincrement())
-  nom          String
-  prenom       String
-  username     String   @unique
-  motdepasse   String
-  telephone    String
-  actif        Boolean  @default(true)
-  dateCreation DateTime @default(now())
+  id                        Int       @id @default(autoincrement())
+  username                  String    @unique
+  motdepasse                String?
+  nom                       String?
+  prenom                    String?
+  telephone                 String?
+  tokenActivation           String?   @unique
+  tokenActivationExpiration DateTime?
+  actif                     Boolean   @default(true)
+  dateCreation              DateTime  @default(now())
 
   structureId Int       @unique
   structure   Structure @relation(fields: [structureId], references: [id])
+
+  agentMatricule Int?   @unique
+  agent          Agent? @relation("AgentEstPointFocal", fields: [agentMatricule], references: [matricule])
+
+  agentsCrees Agent[] @relation("AgentCreePar")
 
   createdAt DateTime @default(now())
   createdBy String?
@@ -104,7 +111,7 @@ model Utilisateur {
   dateCreation DateTime @default(now())
 
   agentMatricule Int   @unique
-  agent          Agent @relation(fields: [agentMatricule], references: [matricule])
+  agent          Agent @relation("AgentEstUtilisateur", fields: [agentMatricule], references: [matricule])
 
   createdAt DateTime @default(now())
   createdBy String?
@@ -115,17 +122,23 @@ model Utilisateur {
 }
 
 model ResponsableEquipeTechnique {
-  id           Int      @id @default(autoincrement())
-  username     String   @unique
-  motdepasse   String
-  telephone    String
-  actif        Boolean  @default(true)
-  dateCreation DateTime @default(now())
+  id                        Int       @id @default(autoincrement())
+  username                  String    @unique
+  motdepasse                String?
+  telephone                 String?
+  tokenActivation           String?   @unique
+  tokenActivationExpiration DateTime?
+  actif                     Boolean   @default(true)
+  dateCreation              DateTime  @default(now())
 
   structureId Int       @unique
   structure   Structure @relation(fields: [structureId], references: [id])
 
-  techniciens Technicien[]
+  agentMatricule Int?   @unique
+  agent          Agent? @relation("AgentEstResponsable", fields: [agentMatricule], references: [matricule])
+
+  techniciens  Technicien[]
+  affectations Affectation[]
 
   createdAt DateTime @default(now())
   createdBy String?
@@ -136,15 +149,20 @@ model ResponsableEquipeTechnique {
 }
 
 model Technicien {
-  id           Int      @id @default(autoincrement())
-  username     String   @unique
-  motdepasse   String
-  telephone    String
-  actif        Boolean  @default(true)
-  dateCreation DateTime @default(now())
+  id                        Int       @id @default(autoincrement())
+  username                  String    @unique
+  motdepasse                String?
+  telephone                 String?
+  tokenActivation           String?   @unique
+  tokenActivationExpiration DateTime?
+  actif                     Boolean   @default(true)
+  dateCreation              DateTime  @default(now())
 
   responsableId Int
   responsable   ResponsableEquipeTechnique @relation(fields: [responsableId], references: [id])
+
+  agentMatricule Int?   @unique
+  agent          Agent? @relation("AgentEstTechnicien", fields: [agentMatricule], references: [matricule])
 
   affectations Affectation[]
 
@@ -167,52 +185,60 @@ model Categorie {
 }
 
 model Ticket {
-  id           Int          @id @default(autoincrement())
-  reference    String       @unique
-  titre        String?
-  description  String       @db.Text
-  statut       StatutTicket @default(SOUMIS)
-  pieceJointe  String?
-  dateCreation DateTime     @default(now())
+  id                Int          @id @default(autoincrement())
+  reference         String       @unique
+  titre             String
+  description       String       @db.Text
+  statut            StatutTicket @default(SOUMIS)
+  pieceJointe       String?
+  derniereRelanceAt DateTime?
+  dateCreation      DateTime     @default(now())
 
   agentMatricule Int
   agent          Agent @relation(fields: [agentMatricule], references: [matricule])
 
-  categorieId Int?
-  categorie   Categorie? @relation(fields: [categorieId], references: [id])
+  categorieId Int
+  categorie   Categorie @relation(fields: [categorieId], references: [id])
 
   affectations Affectation[]
-  notifications Notification[]
 
   @@map("tickets")
 }
 
 model Affectation {
   id              Int               @id @default(autoincrement())
-  dateAffectation DateTime          @default(now())
-  statut          StatutAffectation @default(AFFECTE)
+  dateAffectation DateTime?
+  statut          StatutAffectation @default(EN_ATTENTE)
   commentaire     String?           @db.Text
   priorite        String?
   dateDebutTrait  DateTime?
   dateFinTrait    DateTime?
 
-  transferer            Boolean   @default(false)
-  dateTransfert         DateTime?
-  raisonTransfert       String?
-  commentaireTransfert  String?
+  transfere            Boolean   @default(false)
+  dateTransfert        DateTime?
+  raisonTransfert      String?
+  commentaireTransfert String?
 
   escalade            Boolean   @default(false)
   dateEscalade        DateTime?
+  raisonEscalade      String?
   commentaireEscalade String?
+
+  retourne          Boolean   @default(false)
+  dateRetour        DateTime?
+  raisonRetour      String?
+  commentaireRetour String?
+
+  relanceAutoEnvoyee Boolean @default(false)
 
   ticketId Int
   ticket   Ticket @relation(fields: [ticketId], references: [id])
 
-  technicienId Int
-  technicien   Technicien @relation(fields: [technicienId], references: [id])
+  responsableId Int
+  responsable   ResponsableEquipeTechnique @relation(fields: [responsableId], references: [id])
 
-  structureCibleEscaladeId Int?
-  structureCibleEscalade   Structure? @relation("StructureCibleEscalade", fields: [structureCibleEscaladeId], references: [id])
+  technicienId Int?
+  technicien   Technicien? @relation(fields: [technicienId], references: [id])
 
   affectationPrecedenteId Int?         @unique
   affectationPrecedente   Affectation? @relation("ChaineAffectation", fields: [affectationPrecedenteId], references: [id])
@@ -232,6 +258,7 @@ model SessionToken {
 
   @@map("session_tokens")
 }
+
 model Agent {
   matricule Int     @id
   nom       String
@@ -240,7 +267,6 @@ model Agent {
   numero    String
   email     String  @unique
   actif     Boolean @default(true)
-  role      String?
 
   codeVerification           String?
   codeVerificationExpiration DateTime?
@@ -248,27 +274,17 @@ model Agent {
   structureId Int
   structure   Structure @relation(fields: [structureId], references: [id])
 
-  utilisateur Utilisateur?
+  createdByPointFocalId Int?
+  createdByPointFocal   PointFocal? @relation("AgentCreePar", fields: [createdByPointFocalId], references: [id])
+
+  utilisateur Utilisateur?                @relation("AgentEstUtilisateur")
+  responsable ResponsableEquipeTechnique? @relation("AgentEstResponsable")
+  technicien  Technicien?                 @relation("AgentEstTechnicien")
+  pointFocal  PointFocal?                 @relation("AgentEstPointFocal")
   tickets     Ticket[]
 
   createdAt DateTime @default(now())
-  createdBy String?
   updatedAt DateTime @updatedAt
-  updatedBy String?
 
   @@map("agents")
-}
-model Notification {
-  id                     Int      @id @default(autoincrement())
-  destinataireTypeCompte String
-  destinataireId         Int
-  titre                  String
-  message                String   @db.Text
-  lu                     Boolean  @default(false)
-  dateEnvoi              DateTime @default(now())
-
-  ticketId Int?
-  ticket   Ticket? @relation(fields: [ticketId], references: [id])
-
-  @@map("notifications")
 }

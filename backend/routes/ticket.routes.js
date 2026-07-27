@@ -1,7 +1,6 @@
 const express = require('express');
 const routeur = express.Router();
 const controleur = require('../controllers/ticket.controller');
-const affectationControleur = require('../controllers/affectation.controller');
 const { authentifier, autoriser } = require('../middlewares/auth.middleware');
 const upload = require('../middlewares/upload.middleware');
 
@@ -18,9 +17,9 @@ routeur.post(
   },
   controleur.creer,
 );
+
 routeur.get('/', controleur.lister);
 routeur.get('/:id', controleur.obtenir);
-routeur.post('/:id/affecter', autoriser('RESPONSABLE'), affectationControleur.affecter);
-routeur.patch('/:id/categorie', autoriser('RESPONSABLE'), controleur.classer);
-routeur.post('/:id/escalader', autoriser('RESPONSABLE'), affectationControleur.escaladerDepuisTicket);
+routeur.post('/:id/relancer', autoriser('UTILISATEUR'), controleur.relancer);
+
 module.exports = routeur;
