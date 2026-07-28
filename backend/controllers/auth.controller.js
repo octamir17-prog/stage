@@ -129,8 +129,8 @@ async function finaliserInscription(req, res) {
     return res.status(400).json({ success: false, message: 'Identifiants obligatoires.', errors: [] });
   }
 
-  if (motdepasse.length < 6) {
-    return res.status(400).json({ success: false, message: 'Le mot de passe doit contenir au moins 6 caracteres.', errors: [] });
+  if (motdepasse.length < 8) {
+    return res.status(400).json({ success: false, message: 'Le mot de passe doit contenir au moins 8 caracteres.', errors: [] });
   }
 
   const agent = await prisma.agent.findUnique({ where: { matricule: Number(matricule) } });
@@ -213,8 +213,8 @@ async function activerCompte(req, res) {
     return res.status(400).json({ success: false, message: 'Identifiant et mot de passe obligatoires.', errors: [] });
   }
 
-  if (motdepasse.length < 6) {
-    return res.status(400).json({ success: false, message: 'Le mot de passe doit contenir au moins 6 caracteres.', errors: [] });
+  if (motdepasse.length < 8) {
+    return res.status(400).json({ success: false, message: 'Le mot de passe doit contenir au moins 8 caracteres.', errors: [] });
   }
 
   const trouve = await trouverCompteParToken(token);
@@ -386,8 +386,8 @@ async function changerMotDePasse(req, res) {
     return res.status(400).json({ success: false, message: 'Champs requis manquants.', errors: [] });
   }
 
-  if (nouveauMotDePasse.length < 6) {
-    return res.status(400).json({ success: false, message: 'Le nouveau mot de passe doit contenir au moins 6 caracteres.', errors: [] });
+  if (nouveauMotDePasse.length < 8) {
+    return res.status(400).json({ success: false, message: 'Le nouveau mot de passe doit contenir au moins 8 caracteres.', errors: [] });
   }
 
   const table = prisma[TABLES_PAR_TYPE[req.compte.typeCompte]];

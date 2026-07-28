@@ -1,8 +1,6 @@
 const prisma = require('../prisma/client');
 const { deriverStatutTicket } = require('../utils/statut');
 
-const LIGNE_ACTIVE = { transfere: false, escalade: false, retourne: false };
-
 async function mettreAJourStatutTicket(tx, ticketId, technicienId, statutAffectation) {
   const statut = deriverStatutTicket(technicienId, statutAffectation);
 
@@ -40,7 +38,7 @@ async function chargerAffectation(id) {
 }
 
 async function assignerTechnicien(req, res) {
-  const { technicienId } = req.body;
+  const { technicienId, priorite } = req.body;
 
   if (!technicienId) {
     return res.status(400).json({ success: false, message: 'Le technicien est obligatoire.', errors: [] });
@@ -56,14 +54,6 @@ async function assignerTechnicien(req, res) {
     return res.status(403).json({ success: false, message: 'Cette affectation ne vous appartient pas.', errors: [] });
   }
 
-  if (!estLigneActive(affectation)) {
-    return res.status(409).json({ success: false, message: 'Vous n\'avez plus la main sur ce ticket.', errors: [] });
-  }
-
-  if (affectation.technicienId) {
-    return res.status(409).json({ success: false, message: 'Un technicien est deja assigne, utilisez le transfert.', errors: [] });
-  }
-
   const technicien = await prisma.technicien.findUnique({ where: { id: Number(technicienId) } });
 
   if (!technicien || technicien.responsableId !== req.compte.id) {
@@ -74,22 +64,40 @@ async function assignerTechnicien(req, res) {
     return res.status(409).json({ success: false, message: 'Ce technicien est desactive.', errors: [] });
   }
 
-  const affectationMiseAJour = await prisma.$transaction(async (tx) => {
-    const misAJour = await tx.affectation.update({
-      where: { id: affectation.id },
+  const ligneMiseAJour = await prisma.$transaction(async (tx) => {
+    const resultat = await tx.affectation.updateMany({
+      where: {
+        id: affectation.id,
+        technicienId: null,
+        transfere: false,
+        escalade: false,
+        retourne: false,
+      },
       data: {
         technicienId: technicien.id,
         dateAffectation: new Date(),
-        priorite: req.body.priorite || affectation.priorite,
+        priorite: priorite || affectation.priorite,
       },
     });
 
-    await mettreAJourStatutTicket(tx, affectation.ticketId, technicien.id, misAJour.statut);
+    if (resultat.count === 0) {
+      return null;
+    }
 
-    return misAJour;
+    await mettreAJourStatutTicket(tx, affectation.ticketId, technicien.id, affectation.statut);
+
+    return tx.affectation.findUnique({ where: { id: affectation.id } });
   });
 
-  return res.status(200).json({ success: true, message: 'Technicien assigne.', data: affectationMiseAJour });
+  if (!ligneMiseAJour) {
+    return res.status(409).json({
+      success: false,
+      message: 'Cette affectation a change d\'etat entre-temps (technicien deja assigne ou ligne inactive).',
+      errors: [],
+    });
+  }
+
+  return res.status(200).json({ success: true, message: 'Technicien assigne.', data: ligneMiseAJour });
 }
 
 async function demarrer(req, res) {
@@ -103,26 +111,36 @@ async function demarrer(req, res) {
     return res.status(403).json({ success: false, message: 'Cette affectation ne vous appartient pas.', errors: [] });
   }
 
-  if (!estLigneActive(affectation)) {
-    return res.status(409).json({ success: false, message: 'Vous n\'avez plus la main sur ce ticket.', errors: [] });
-  }
-
-  if (affectation.statut !== 'EN_ATTENTE') {
-    return res.status(409).json({ success: false, message: 'Ce traitement a deja ete demarre.', errors: [] });
-  }
-
-  const affectationMiseAJour = await prisma.$transaction(async (tx) => {
-    const misAJour = await tx.affectation.update({
-      where: { id: affectation.id },
+  const ligneMiseAJour = await prisma.$transaction(async (tx) => {
+    const resultat = await tx.affectation.updateMany({
+      where: {
+        id: affectation.id,
+        statut: 'EN_ATTENTE',
+        transfere: false,
+        escalade: false,
+        retourne: false,
+      },
       data: { statut: 'EN_TRAITEMENT', dateDebutTrait: new Date() },
     });
 
+    if (resultat.count === 0) {
+      return null;
+    }
+
     await mettreAJourStatutTicket(tx, affectation.ticketId, affectation.technicienId, 'EN_TRAITEMENT');
 
-    return misAJour;
+    return tx.affectation.findUnique({ where: { id: affectation.id } });
   });
 
-  return res.status(200).json({ success: true, message: 'Traitement demarre.', data: affectationMiseAJour });
+  if (!ligneMiseAJour) {
+    return res.status(409).json({
+      success: false,
+      message: 'Ce traitement ne peut pas etre demarre dans son etat actuel.',
+      errors: [],
+    });
+  }
+
+  return res.status(200).json({ success: true, message: 'Traitement demarre.', data: ligneMiseAJour });
 }
 
 async function cloturer(req, res) {
@@ -138,17 +156,15 @@ async function cloturer(req, res) {
     return res.status(403).json({ success: false, message: 'Cette affectation ne vous appartient pas.', errors: [] });
   }
 
-  if (!estLigneActive(affectation)) {
-    return res.status(409).json({ success: false, message: 'Vous n\'avez plus la main sur ce ticket.', errors: [] });
-  }
-
-  if (affectation.statut !== 'EN_TRAITEMENT') {
-    return res.status(409).json({ success: false, message: 'Le traitement doit etre demarre avant la cloture.', errors: [] });
-  }
-
-  const affectationMiseAJour = await prisma.$transaction(async (tx) => {
-    const misAJour = await tx.affectation.update({
-      where: { id: affectation.id },
+  const ligneMiseAJour = await prisma.$transaction(async (tx) => {
+    const resultat = await tx.affectation.updateMany({
+      where: {
+        id: affectation.id,
+        statut: 'EN_TRAITEMENT',
+        transfere: false,
+        escalade: false,
+        retourne: false,
+      },
       data: {
         statut: 'CLOTUREE',
         dateFinTrait: new Date(),
@@ -156,12 +172,24 @@ async function cloturer(req, res) {
       },
     });
 
+    if (resultat.count === 0) {
+      return null;
+    }
+
     await mettreAJourStatutTicket(tx, affectation.ticketId, affectation.technicienId, 'CLOTUREE');
 
-    return misAJour;
+    return tx.affectation.findUnique({ where: { id: affectation.id } });
   });
 
-  return res.status(200).json({ success: true, message: 'Ticket cloture.', data: affectationMiseAJour });
+  if (!ligneMiseAJour) {
+    return res.status(409).json({
+      success: false,
+      message: 'Ce ticket ne peut pas etre cloture dans son etat actuel (le traitement doit etre demarre).',
+      errors: [],
+    });
+  }
+
+  return res.status(200).json({ success: true, message: 'Ticket cloture.', data: ligneMiseAJour });
 }
 
 async function transferer(req, res) {
@@ -181,16 +209,8 @@ async function transferer(req, res) {
     return res.status(403).json({ success: false, message: 'Cette affectation ne releve pas de votre equipe.', errors: [] });
   }
 
-  if (!estLigneActive(affectation)) {
-    return res.status(409).json({ success: false, message: 'Cette affectation a deja ete transferee, escaladee ou retournee.', errors: [] });
-  }
-
   if (!affectation.technicienId) {
     return res.status(409).json({ success: false, message: 'Aucun technicien assigne, utilisez l\'assignation au lieu du transfert.', errors: [] });
-  }
-
-  if (affectation.statut === 'CLOTUREE') {
-    return res.status(409).json({ success: false, message: 'Ce ticket est deja cloture.', errors: [] });
   }
 
   if (Number(nouveauTechnicienId) === affectation.technicienId) {
@@ -207,32 +227,45 @@ async function transferer(req, res) {
     return res.status(409).json({ success: false, message: 'Ce technicien est desactive.', errors: [] });
   }
 
-  const nouvelleAffectation = await prisma.$transaction(async (tx) => {
-    await tx.affectation.update({
-      where: { id: affectation.id },
-      data: {
-        transfere: true,
-        dateTransfert: new Date(),
-        raisonTransfert,
-        commentaireTransfert: commentaireTransfert || null,
-      },
+  let nouvelleAffectation;
+
+  try {
+    nouvelleAffectation = await prisma.$transaction(async (tx) => {
+      const resultat = await tx.affectation.updateMany({
+        where: { id: affectation.id, transfere: false, escalade: false, retourne: false },
+        data: {
+          transfere: true,
+          dateTransfert: new Date(),
+          raisonTransfert,
+          commentaireTransfert: commentaireTransfert || null,
+        },
+      });
+
+      if (resultat.count === 0) {
+        throw new Error('LIGNE_DEJA_TRAITEE');
+      }
+
+      const creee = await tx.affectation.create({
+        data: {
+          ticketId: affectation.ticketId,
+          responsableId: affectation.responsableId,
+          technicienId: nouveauTechnicien.id,
+          dateAffectation: new Date(),
+          priorite: affectation.priorite,
+          affectationPrecedenteId: affectation.id,
+        },
+      });
+
+      await mettreAJourStatutTicket(tx, affectation.ticketId, nouveauTechnicien.id, 'EN_ATTENTE');
+
+      return creee;
     });
-
-    const creee = await tx.affectation.create({
-      data: {
-        ticketId: affectation.ticketId,
-        responsableId: affectation.responsableId,
-        technicienId: nouveauTechnicien.id,
-        dateAffectation: new Date(),
-        priorite: affectation.priorite,
-        affectationPrecedenteId: affectation.id,
-      },
-    });
-
-    await mettreAJourStatutTicket(tx, affectation.ticketId, nouveauTechnicien.id, 'EN_ATTENTE');
-
-    return creee;
-  });
+  } catch (erreur) {
+    if (erreur.message === 'LIGNE_DEJA_TRAITEE') {
+      return res.status(409).json({ success: false, message: 'Cette affectation a change d\'etat entre-temps.', errors: [] });
+    }
+    throw erreur;
+  }
 
   return res.status(201).json({ success: true, message: 'Ticket transfere.', data: nouvelleAffectation });
 }
@@ -308,30 +341,43 @@ async function escalader(req, res) {
     });
   }
 
-  const nouvelleAffectation = await prisma.$transaction(async (tx) => {
-    await tx.affectation.update({
-      where: { id: affectation.id },
-      data: {
-        escalade: true,
-        dateEscalade: new Date(),
-        raisonEscalade: raisonEscalade || null,
-        commentaireEscalade: commentaireEscalade || null,
-      },
+  let nouvelleAffectation;
+
+  try {
+    nouvelleAffectation = await prisma.$transaction(async (tx) => {
+      const resultat = await tx.affectation.updateMany({
+        where: { id: affectation.id, transfere: false, escalade: false, retourne: false },
+        data: {
+          escalade: true,
+          dateEscalade: new Date(),
+          raisonEscalade: raisonEscalade || null,
+          commentaireEscalade: commentaireEscalade || null,
+        },
+      });
+
+      if (resultat.count === 0) {
+        throw new Error('LIGNE_DEJA_TRAITEE');
+      }
+
+      const creee = await tx.affectation.create({
+        data: {
+          ticketId: affectation.ticketId,
+          responsableId: responsableCible.id,
+          priorite: affectation.priorite,
+          affectationPrecedenteId: affectation.id,
+        },
+      });
+
+      await mettreAJourStatutTicket(tx, affectation.ticketId, null, 'EN_ATTENTE');
+
+      return creee;
     });
-
-    const creee = await tx.affectation.create({
-      data: {
-        ticketId: affectation.ticketId,
-        responsableId: responsableCible.id,
-        priorite: affectation.priorite,
-        affectationPrecedenteId: affectation.id,
-      },
-    });
-
-    await mettreAJourStatutTicket(tx, affectation.ticketId, null, 'EN_ATTENTE');
-
-    return creee;
-  });
+  } catch (erreur) {
+    if (erreur.message === 'LIGNE_DEJA_TRAITEE') {
+      return res.status(409).json({ success: false, message: 'Cette affectation a change d\'etat entre-temps.', errors: [] });
+    }
+    throw erreur;
+  }
 
   return res.status(201).json({ success: true, message: 'Ticket escalade.', data: nouvelleAffectation });
 }
@@ -383,30 +429,43 @@ async function retourner(req, res) {
     });
   }
 
-  const nouvelleAffectation = await prisma.$transaction(async (tx) => {
-    await tx.affectation.update({
-      where: { id: affectation.id },
-      data: {
-        retourne: true,
-        dateRetour: new Date(),
-        raisonRetour,
-        commentaireRetour: commentaireRetour || null,
-      },
+  let nouvelleAffectation;
+
+  try {
+    nouvelleAffectation = await prisma.$transaction(async (tx) => {
+      const resultat = await tx.affectation.updateMany({
+        where: { id: affectation.id, transfere: false, escalade: false, retourne: false },
+        data: {
+          retourne: true,
+          dateRetour: new Date(),
+          raisonRetour,
+          commentaireRetour: commentaireRetour || null,
+        },
+      });
+
+      if (resultat.count === 0) {
+        throw new Error('LIGNE_DEJA_TRAITEE');
+      }
+
+      const creee = await tx.affectation.create({
+        data: {
+          ticketId: affectation.ticketId,
+          responsableId: responsableOrigine.id,
+          priorite: affectation.priorite,
+          affectationPrecedenteId: affectation.id,
+        },
+      });
+
+      await mettreAJourStatutTicket(tx, affectation.ticketId, null, 'EN_ATTENTE');
+
+      return creee;
     });
-
-    const creee = await tx.affectation.create({
-      data: {
-        ticketId: affectation.ticketId,
-        responsableId: responsableOrigine.id,
-        priorite: affectation.priorite,
-        affectationPrecedenteId: affectation.id,
-      },
-    });
-
-    await mettreAJourStatutTicket(tx, affectation.ticketId, null, 'EN_ATTENTE');
-
-    return creee;
-  });
+  } catch (erreur) {
+    if (erreur.message === 'LIGNE_DEJA_TRAITEE') {
+      return res.status(409).json({ success: false, message: 'Cette affectation a change d\'etat entre-temps.', errors: [] });
+    }
+    throw erreur;
+  }
 
   return res.status(201).json({ success: true, message: 'Ticket retourne a la structure d\'origine.', data: nouvelleAffectation });
 }
