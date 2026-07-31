@@ -18,7 +18,7 @@ const { gestionnaireNotFound, gestionnaireErreurs } = require('./middlewares/err
 const { demarrerTacheRelance } = require('./jobs/relance');
 
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 5001;
 
 const originesAutorisees = (process.env.FRONTEND_URL || '')
   .split(',')
@@ -43,6 +43,11 @@ function verifierOrigine(origine, callback) {
 
 app.use(cors({ origin: verifierOrigine }));
 app.use(express.json());
+
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} ${req.method} ${req.originalUrl}`);
+  next();
+});
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 app.use('/api/auth', authRoutes);
