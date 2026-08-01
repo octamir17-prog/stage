@@ -27,7 +27,13 @@ async function chargerAffectation(id) {
     include: {
       ticket: true,
       technicien: true,
-      affectationPrecedente: true,
+      affectationPrecedente: {
+        include: {
+          responsable: {
+            include: { structure: true },
+          },
+        },
+      },
       responsable: {
         include: {
           structure: { include: { niveau: true } },
@@ -42,6 +48,10 @@ async function assignerTechnicien(req, res) {
 
   if (!technicienId) {
     return res.status(400).json({ success: false, message: 'Le technicien est obligatoire.', errors: [] });
+  }
+
+  if (!priorite) {
+    return res.status(400).json({ success: false, message: 'La priorite est obligatoire.', errors: [] });
   }
 
   const affectation = await chargerAffectation(req.params.id);
@@ -298,14 +308,6 @@ async function escalader(req, res) {
     return res.status(409).json({ success: false, message: 'Ce ticket est deja cloture.', errors: [] });
   }
 
-  if (aEteRecuParEscalade(affectation)) {
-    return res.status(409).json({
-      success: false,
-      message: 'Cette structure a recu ce ticket par escalade, elle ne peut pas l\'escalader plus haut.',
-      errors: [],
-    });
-  }
-
   const structureCible = await prisma.structure.findUnique({
     where: { codeStructure: codeStructureCible },
     include: { niveau: true },
@@ -321,10 +323,21 @@ async function escalader(req, res) {
     return res.status(409).json({ success: false, message: 'La structure cible est la structure actuelle.', errors: [] });
   }
 
-  if (structureCible.niveau.ordre >= structureActuelle.niveau.ordre) {
+  if (structureCible.niveau.ordre > structureActuelle.niveau.ordre) {
     return res.status(409).json({
       success: false,
-      message: 'L\'escalade doit se faire vers une structure de niveau superieur.',
+      message: 'L\'escalade doit se faire vers une structure de niveau superieur ou de meme niveau.',
+      errors: [],
+    });
+  }
+
+  const vientDUneEscalade = affectation.affectationPrecedente && affectation.affectationPrecedente.escalade === true;
+  const structureOrigine = vientDUneEscalade ? affectation.affectationPrecedente.responsable.structure : null;
+
+  if (structureOrigine && structureOrigine.id === structureCible.id) {
+    return res.status(409).json({
+      success: false,
+      message: 'Impossible d\'escalader vers la structure dont ce ticket vient d\'etre recu.',
       errors: [],
     });
   }

@@ -1,5 +1,11 @@
 const nodemailer = require('nodemailer');
 
+function origineFrontendPourLiens() {
+  const brut = process.env.FRONTEND_URL || '';
+  const premiere = brut.split(',')[0].trim();
+  return premiere;
+}
+
 const transporteur = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
   port: Number(process.env.SMTP_PORT),
@@ -39,8 +45,8 @@ Ce code est valable 1 heure.`;
   return envoyer(destinataire, sujet, contenu);
 }
 
-async function envoyerLienActivation(destinataire, nomComplet, libelleRole, structureDesignation, token) {
-  const urlActivation = `${process.env.FRONTEND_URL}/activation/${token}`;
+async function envoyerLienActivation(destinataire, nomComplet, libelleRole, structureDesignation, token, suggestionUsername) {
+  const urlActivation = `${origineFrontendPourLiens()}/activation/${token}`;
   const sujet = `Activation de votre compte ${libelleRole}`;
   const contenu = `Bonjour ${nomComplet},
 
@@ -49,13 +55,15 @@ Vous avez ete designe ${libelleRole} pour la structure : ${structureDesignation}
 Rendez-vous sur le lien ci-dessous pour choisir votre identifiant et votre mot de passe :
 ${urlActivation}
 
+Suggestion de nom d'utilisateur : ${suggestionUsername} (vous pouvez en choisir un autre si vous preferez).
+
 Ce lien est valable 24 heures et ne peut etre utilise qu'une seule fois.`;
 
   return envoyer(destinataire, sujet, contenu);
 }
 
 async function envoyerConfirmationActivation(destinataire, nomComplet, libelleRole) {
-  const urlConnexionStaff = `${process.env.FRONTEND_URL}/connexion-staff`;
+  const urlConnexionStaff = `${origineFrontendPourLiens()}/connexion-staff`;
   const sujet = 'Votre compte est actif';
   const contenu = `Bonjour ${nomComplet},
 
